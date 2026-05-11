@@ -341,6 +341,20 @@ state = {
 }
 state_lock = threading.Lock()
 
+# Lazy scan thread start — works with any WSGI server (gunicorn, waitress, plain)
+_scan_started = False
+_scan_start_lock = threading.Lock()
+
+@app.before_request
+def ensure_scan_running():
+    global _scan_started
+    if not _scan_started:
+        with _scan_start_lock:
+            if not _scan_started:
+                _scan_started = True
+                t = threading.Thread(target=scan_loop, daemon=True)
+                t.start()
+
 def make_exchange():
     opts = {
         "enableRateLimit": True,
