@@ -12,7 +12,7 @@ Uso:
 Sem instalação extra — usa apenas bibliotecas padrão do Python.
 """
 
-import sys, json, time, threading, webbrowser, argparse
+import sys, json, os, time, threading, webbrowser, argparse
 from datetime import datetime
 from urllib.request import urlopen
 from urllib.error import URLError
@@ -22,15 +22,32 @@ from urllib.error import URLError
 # ─────────────────────────────────────────────────────────────────────────────
 DASHBOARD_CLOUD = "https://crypto-futures-dashboard.onrender.com"
 DASHBOARD_LOCAL = "http://localhost:5000"
-CHECK_INTERVAL  = 60         # segundos entre verificações
-DEFAULT_GRADES  = ["S", "A"] # grades que disparam o alerta
+CHECK_INTERVAL  = 60          # segundos entre verificações
+DEFAULT_GRADES  = ["S", "A"]  # grades que disparam o alerta
 BINANCE_BASE    = "https://www.binance.com/futures/{symbol}USDT"
+CONFIG_FILE     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monitor_config.json")
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Cores ANSI para terminal Windows 10+
 R="\033[0m"; CYAN="\033[96m"; GREEN="\033[92m"; RED="\033[91m"
 YELLOW="\033[93m"; MAG="\033[95m"; DIM="\033[90m"; BOLD="\033[1m"
 
+# ─── Persistência de configurações do usuário ────────────────────────────────
+def load_config():
+    try:
+        with open(CONFIG_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"capital": 1000.0, "risk_pct": 1.0, "leverage": 5}
+
+def save_config(cfg):
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+    except Exception:
+        pass
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────
 def fmt(v):
     if v is None: return "—"
     if v >= 1000:  return f"{v:,.2f}"
@@ -45,14 +62,21 @@ def fmt_grade(g):
     colors = {"S": GREEN, "A": CYAN, "B": YELLOW, "C": DIM}
     return f"{colors.get(g, R)}{BOLD}{g}{R}"
 
+def parse_min_leverage(lev_str):
+    """Extrai o valor mínimo de alavancagem de strings como '3-5x' ou '10x'."""
+    try:
+        return int(str(lev_str).replace("x", "").split("-")[0])
+    except Exception:
+        return 3
+
 # ─── Som de alerta (Windows built-in) ────────────────────────────────────────
 def beep(grade):
     try:
         import winsound
         patterns = {
-            "S": [(1200, 150), (1000, 100), (1200, 300)],  # 3 bips — sinal top
-            "A": [(1000, 150), (1000, 300)],                # 2 bips
-            "B": [(800,  200)],                             # 1 bip suave
+            "S": [(1200, 150), (1000, 100), (1200, 300)],
+            "A": [(1000, 150), (1000, 300)],
+            "B": [(800, 200)],
         }
         for freq, dur in patterns.get(grade, [(800, 200)]):
             winsound.Beep(freq, dur)
@@ -60,101 +84,245 @@ def beep(grade):
     except Exception:
         pass
 
-# ─── Popup de alerta (Tkinter built-in) ──────────────────────────────────────
+# ─── Popup de alerta com Calculadora de Posição ──────────────────────────────
 def show_popup(opp, dashboard_url):
     try:
         import tkinter as tk
+        from tkinter import font as tkfont
+
+        cfg = load_config()
 
         root = tk.Tk()
         is_long   = opp["direction"] == "LONG"
         dir_color = "#00ff88" if is_long else "#ff2d55"
         grade     = opp.get("grade", "?")
         grade_colors = {"S": "#00ff88", "A": "#00f5ff", "B": "#f5e642", "C": "#555555"}
-        gc = grade_colors.get(grade, "#e0e0e0")
 
         root.title(f"⚡ SINAL {grade} — {opp['name']}/USDT")
         root.configure(bg="#0a0a0a")
         root.resizable(False, False)
         root.attributes("-topmost", True)
 
-        W, H = 500, 560
+        W, H = 520, 780
         root.update_idletasks()
         sx = (root.winfo_screenwidth()  - W) // 2
         sy = (root.winfo_screenheight() - H) // 2
         root.geometry(f"{W}x{H}+{sx}+{sy}")
 
+        entry_price = float(opp.get("entry", 0) or 0)
+        stop_price  = float(opp.get("stop_loss", 0) or 0)
+        stop_dist   = abs(entry_price - stop_price)
+
         # ── Header ────────────────────────────────────────────────────────────
-        hdr = tk.Frame(root, bg="#111111", pady=14)
+        hdr = tk.Frame(root, bg="#111111", pady=12)
         hdr.pack(fill="x")
-        tk.Label(hdr, text=f"⬡ {opp['name']}/USDT  •  PERPETUAL",
+        tk.Label(hdr, text=f"⬡  {opp['name']}/USDT  •  PERPETUAL",
                  font=("Courier New", 16, "bold"), fg="#00f5ff", bg="#111111").pack()
-        dir_lbl = f"{'▲  LONG' if is_long else '▼  SHORT'}   •   GRADE {grade}   •   Confiança {opp['confidence']}%"
-        tk.Label(hdr, text=dir_lbl, font=("Courier New", 11, "bold"),
-                 fg=dir_color, bg="#111111").pack()
+        tk.Label(hdr,
+                 text=f"{'▲  LONG' if is_long else '▼  SHORT'}   •   GRADE {grade}   •   Confiança {opp['confidence']}%",
+                 font=("Courier New", 11, "bold"), fg=dir_color, bg="#111111").pack()
         tk.Label(hdr, text=f"Detectado às {datetime.now().strftime('%H:%M:%S')}",
                  font=("Courier New", 8), fg="#444444", bg="#111111").pack()
 
         # ── Barra de confiança ────────────────────────────────────────────────
-        conf_frame = tk.Frame(root, bg="#0a0a0a", padx=20, pady=6)
-        conf_frame.pack(fill="x")
-        canvas = tk.Canvas(conf_frame, height=8, bg="#1e1e1e",
-                           highlightthickness=0, bd=0)
-        canvas.pack(fill="x")
+        cf = tk.Frame(root, bg="#0a0a0a", padx=20, pady=5)
+        cf.pack(fill="x")
         conf_pct = opp.get("confidence", 0) / 100
-        def draw_bar(event=None):
-            w = canvas.winfo_width()
+        cv = tk.Canvas(cf, height=6, bg="#1e1e1e", highlightthickness=0, bd=0)
+        cv.pack(fill="x")
+        def draw_conf(e=None):
+            w = cv.winfo_width()
             if w > 1:
-                canvas.delete("all")
-                canvas.create_rectangle(0, 0, w, 8, fill="#1e1e1e", outline="")
-                canvas.create_rectangle(0, 0, int(w * conf_pct), 8,
-                                        fill=dir_color, outline="")
-        canvas.bind("<Configure>", draw_bar)
+                cv.delete("all")
+                cv.create_rectangle(0, 0, w, 6, fill="#1e1e1e", outline="")
+                cv.create_rectangle(0, 0, int(w * conf_pct), 6, fill=dir_color, outline="")
+        cv.bind("<Configure>", draw_conf)
 
         # ── Tabela de níveis ──────────────────────────────────────────────────
-        tbl = tk.Frame(root, bg="#0a0a0a", padx=20, pady=8)
-        tbl.pack(fill="both", expand=True)
-
+        tbl = tk.Frame(root, bg="#0a0a0a", padx=18, pady=6)
+        tbl.pack(fill="x")
         rows = [
-            ("Preço Atual",   fmt(opp["price"]),     "#e0e0e0"),
-            ("Entrada",       fmt(opp["entry"]),      "#e0e0e0"),
-            ("Stop Loss",     fmt(opp["stop_loss"]),  "#ff2d55"),
-            ("TP1",
-             f"{fmt(opp['tp1'])}   R/R {opp['rr1']}:1", "#00ff88"),
-            ("TP2",
-             f"{fmt(opp['tp2'])}   R/R {opp['rr2']}:1", "#00c96e"),
-            ("Alavancagem",   opp.get("leverage","—"),  "#ff00ff"),
-            ("RSI",           str(opp.get("rsi","—")), "#00f5ff"),
-            ("ADX / Tendência",
-             f"{opp.get('adx','—')}   {opp.get('trend','—')}", "#f5e642"),
-            ("Estrutura",     opp.get("market_structure","—"), "#00f5ff"),
+            ("Preço Atual",        fmt(opp["price"]),                       "#e0e0e0"),
+            ("Entrada",            fmt(opp["entry"]),                       "#e0e0e0"),
+            ("Stop Loss",          fmt(opp["stop_loss"]),                   "#ff2d55"),
+            ("TP1",                f"{fmt(opp['tp1'])}   R/R {opp['rr1']}:1", "#00ff88"),
+            ("TP2",                f"{fmt(opp['tp2'])}   R/R {opp['rr2']}:1", "#00c96e"),
+            ("Alav. sugerida",     opp.get("leverage", "—"),                "#ff00ff"),
+            ("RSI  /  ADX",        f"{opp.get('rsi','—')}  •  {opp.get('adx','—')}  ({opp.get('trend','—')})", "#f5e642"),
+            ("Estrutura",          opp.get("market_structure", "—"),        "#00f5ff"),
         ]
-
-        for i, (label, value, color) in enumerate(rows):
+        for i, (lbl, val, col) in enumerate(rows):
             bg = "#111111" if i % 2 == 0 else "#0d0d0d"
             row = tk.Frame(tbl, bg=bg)
-            row.pack(fill="x", ipady=4)
-            tk.Label(row, text=f"  {label}", font=("Courier New", 9),
-                     fg="#555555", bg=bg, width=18, anchor="w").pack(side="left")
-            tk.Label(row, text=value, font=("Courier New", 10, "bold"),
-                     fg=color, bg=bg, anchor="w").pack(side="left", padx=6)
+            row.pack(fill="x", ipady=3)
+            tk.Label(row, text=f"  {lbl}", font=("Courier New", 8),
+                     fg="#555555", bg=bg, width=17, anchor="w").pack(side="left")
+            tk.Label(row, text=val, font=("Courier New", 9, "bold"),
+                     fg=col, bg=bg, anchor="w").pack(side="left", padx=6)
 
         # ── Top sinais ────────────────────────────────────────────────────────
-        sep = tk.Frame(root, bg="#1e1e1e", height=1)
-        sep.pack(fill="x", padx=20, pady=4)
+        tk.Frame(root, bg="#1e1e1e", height=1).pack(fill="x", padx=18, pady=3)
+        sf = tk.Frame(root, bg="#0a0a0a", padx=18)
+        sf.pack(fill="x")
+        for s in opp.get("signals", [])[:3]:
+            sc = "#00f5ff" if s.get("tier",1) >= 3 else \
+                 "#f5e642"  if s.get("tier",1) >= 2 else "#444444"
+            icon = "◈" if s.get("tier",1) >= 3 else "◆"
+            tk.Label(sf, text=f"{icon}  {s['msg']}", font=("Courier New", 7),
+                     fg=sc, bg="#0a0a0a", anchor="w", wraplength=475).pack(fill="x", pady=1)
 
-        sig_frame = tk.Frame(root, bg="#0a0a0a", padx=20)
-        sig_frame.pack(fill="x")
-        signals = opp.get("signals", [])[:4]
-        for s in signals:
-            sc = "#00f5ff" if s.get("tier", 1) >= 3 else \
-                 "#f5e642"  if s.get("tier", 1) >= 2 else "#444444"
-            tk.Label(sig_frame,
-                     text=f"{'◈' if s.get('tier',1)>=3 else '◆'}  {s['msg']}",
-                     font=("Courier New", 7), fg=sc, bg="#0a0a0a",
-                     anchor="w", wraplength=455).pack(fill="x", pady=1)
+        # ════════════════════════════════════════════════════════════════════
+        #  CALCULADORA DE POSIÇÃO
+        # ════════════════════════════════════════════════════════════════════
+        tk.Frame(root, bg="#00f5ff", height=1).pack(fill="x", padx=18, pady=6)
+        calc_hdr = tk.Frame(root, bg="#0a0a0a", padx=18)
+        calc_hdr.pack(fill="x")
+        tk.Label(calc_hdr, text="◈  CALCULADORA DE POSIÇÃO",
+                 font=("Courier New", 9, "bold"), fg="#00f5ff", bg="#0a0a0a").pack(anchor="w")
 
-        # ── Botões ────────────────────────────────────────────────────────────
-        btn_frame = tk.Frame(root, bg="#0a0a0a", pady=14)
+        calc = tk.Frame(root, bg="#0f0f0f", padx=18, pady=10,
+                        highlightbackground="#1e1e1e", highlightthickness=1)
+        calc.pack(fill="x", padx=18, pady=(2, 6))
+
+        # ── Linha de inputs ───────────────────────────────────────────────────
+        inp_row = tk.Frame(calc, bg="#0f0f0f")
+        inp_row.pack(fill="x", pady=(0, 8))
+
+        input_cfg = [
+            ("Capital ($)",  str(cfg.get("capital", 1000.0)), 10),
+            ("Risco (%)",    str(cfg.get("risk_pct", 1.0)),    6),
+            ("Alavancagem",  str(cfg.get("leverage",
+                                         parse_min_leverage(opp.get("leverage","3x")))), 6),
+        ]
+
+        vars_ = []
+        entries_ = []
+        for label, default, width in input_cfg:
+            col = tk.Frame(inp_row, bg="#0f0f0f")
+            col.pack(side="left", padx=(0, 16))
+            tk.Label(col, text=label, font=("Courier New", 7),
+                     fg="#555555", bg="#0f0f0f").pack(anchor="w")
+            var = tk.StringVar(value=default)
+            ent = tk.Entry(col, textvariable=var, width=width,
+                           font=("Courier New", 10, "bold"),
+                           bg="#1a1a1a", fg="#e0e0e0", insertbackground="#00f5ff",
+                           relief="flat", bd=4, highlightthickness=1,
+                           highlightbackground="#333333", highlightcolor="#00f5ff")
+            ent.pack()
+            vars_.append(var)
+            entries_.append(ent)
+
+        cap_var, risk_var, lev_var = vars_
+
+        # ── Resultados da calculadora ─────────────────────────────────────────
+        res_frame = tk.Frame(calc, bg="#0f0f0f")
+        res_frame.pack(fill="x")
+
+        def make_result_row(parent, label):
+            f = tk.Frame(parent, bg="#161616")
+            f.pack(fill="x", pady=2, ipady=4)
+            tk.Label(f, text=f"  {label}", font=("Courier New", 8),
+                     fg="#555555", bg="#161616", width=22, anchor="w").pack(side="left")
+            var = tk.StringVar(value="—")
+            lbl = tk.Label(f, textvariable=var, font=("Courier New", 10, "bold"),
+                           fg="#00f5ff", bg="#161616", anchor="w")
+            lbl.pack(side="left", padx=6)
+            return var, lbl
+
+        risk_val_var,  risk_val_lbl  = make_result_row(res_frame, "Valor em Risco ($)")
+        stop_dist_var, stop_dist_lbl = make_result_row(res_frame, "Distância do Stop")
+        size_var,      size_lbl      = make_result_row(res_frame, "Tamanho (moedas)")
+        notional_var,  notional_lbl  = make_result_row(res_frame, "Valor Notional ($)")
+        margin_var,    margin_lbl    = make_result_row(res_frame, "Margem Necessária ($)")
+        pnl_tp1_var,   pnl_tp1_lbl  = make_result_row(res_frame, "Lucro estimado TP1 ($)")
+        pnl_tp2_var,   pnl_tp2_lbl  = make_result_row(res_frame, "Lucro estimado TP2 ($)")
+
+        # ── Botão copiar tamanho ──────────────────────────────────────────────
+        copy_frame = tk.Frame(calc, bg="#0f0f0f")
+        copy_frame.pack(fill="x", pady=(6, 0))
+        copy_btn = tk.Button(copy_frame, text="📋  Copiar tamanho",
+                             font=("Courier New", 8), fg="#00f5ff",
+                             bg="#1a1a2e", relief="flat", padx=10, pady=4,
+                             cursor="hand2")
+        copy_btn.pack(side="left")
+        copy_note = tk.Label(copy_frame, text="", font=("Courier New", 7),
+                             fg="#00ff88", bg="#0f0f0f")
+        copy_note.pack(side="left", padx=8)
+
+        # ── Lógica de cálculo ─────────────────────────────────────────────────
+        _last_size = {"v": "0"}
+
+        def recalculate(*_):
+            try:
+                capital  = float(cap_var.get().replace(",", "."))
+                risk_pct = float(risk_var.get().replace(",", "."))
+                leverage = float(lev_var.get().replace("x", ""))
+                if capital <= 0 or risk_pct <= 0 or leverage <= 0:
+                    raise ValueError
+
+                risk_amount = capital * risk_pct / 100
+                dist        = stop_dist if stop_dist > 0 else 1
+                size        = risk_amount / dist
+                notional    = size * entry_price
+                margin      = notional / leverage
+
+                tp1 = float(opp.get("tp1", 0) or 0)
+                tp2 = float(opp.get("tp2", 0) or 0)
+                if is_long:
+                    pnl1 = size * (tp1 - entry_price)
+                    pnl2 = size * (tp2 - entry_price)
+                else:
+                    pnl1 = size * (entry_price - tp1)
+                    pnl2 = size * (entry_price - tp2)
+
+                # formata tamanho de acordo com o preço do ativo
+                if entry_price >= 1000:   size_fmt = f"{size:.4f}"
+                elif entry_price >= 1:    size_fmt = f"{size:.3f}"
+                else:                     size_fmt = f"{size:.1f}"
+
+                _last_size["v"] = size_fmt
+
+                risk_val_var.set(f"${risk_amount:.2f}  ({risk_pct}% do capital)")
+                stop_dist_var.set(f"{fmt(dist)}  ({dist/entry_price*100:.2f}% do entry)")
+                size_var.set(size_fmt)
+                notional_var.set(f"${notional:,.2f}")
+                margin_var.set(f"${margin:,.2f}")
+                pnl_tp1_var.set(f"${pnl1:,.2f}  (+{pnl1/margin*100:.1f}% na margem)" if margin > 0 else "—")
+                pnl_tp2_var.set(f"${pnl2:,.2f}  (+{pnl2/margin*100:.1f}% na margem)" if margin > 0 else "—")
+
+                # cores dinâmicas
+                size_lbl.config(fg="#00ff88")
+                margin_lbl.config(fg="#ff00ff" if margin > capital * 0.3 else "#00ff88")
+                pnl_tp1_lbl.config(fg="#00ff88" if pnl1 > 0 else "#ff2d55")
+                pnl_tp2_lbl.config(fg="#00ff88" if pnl2 > 0 else "#ff2d55")
+
+                # salva configurações do usuário
+                save_config({"capital": capital, "risk_pct": risk_pct, "leverage": int(leverage)})
+
+            except Exception:
+                for v in [risk_val_var, stop_dist_var, size_var,
+                          notional_var, margin_var, pnl_tp1_var, pnl_tp2_var]:
+                    v.set("—")
+
+        # Recalcula ao mudar qualquer campo
+        for var in vars_:
+            var.trace_add("write", recalculate)
+
+        # Calcula imediatamente ao abrir
+        root.after(100, recalculate)
+
+        def copy_size():
+            root.clipboard_clear()
+            root.clipboard_append(_last_size["v"])
+            root.update()
+            copy_note.config(text=f"✓ copiado: {_last_size['v']}")
+            root.after(2500, lambda: copy_note.config(text=""))
+
+        copy_btn.config(command=copy_size)
+
+        # ── Botões principais ─────────────────────────────────────────────────
+        tk.Frame(root, bg="#1e1e1e", height=1).pack(fill="x", padx=18, pady=4)
+        btn_frame = tk.Frame(root, bg="#0a0a0a", pady=10)
         btn_frame.pack(fill="x")
 
         def open_binance():
@@ -163,26 +331,24 @@ def show_popup(opp, dashboard_url):
             webbrowser.open(url)
             root.destroy()
 
-        def open_dashboard():
-            webbrowser.open(dashboard_url)
-
-        tk.Button(btn_frame, text=f"{'🟢' if is_long else '🔴'}  Abrir Binance Futures",
+        tk.Button(btn_frame,
+                  text=f"{'🟢' if is_long else '🔴'}  Abrir Binance Futures",
                   command=open_binance,
                   font=("Courier New", 11, "bold"), fg="#000000",
-                  bg=dir_color, relief="flat", padx=18, pady=9,
-                  cursor="hand2").pack(side="left", padx=(20, 8))
+                  bg=dir_color, relief="flat", padx=16, pady=9,
+                  cursor="hand2").pack(side="left", padx=(18, 6))
 
         tk.Button(btn_frame, text="📊 Dashboard",
-                  command=open_dashboard,
+                  command=lambda: webbrowser.open(dashboard_url),
                   font=("Courier New", 9), fg="#00f5ff",
                   bg="#1a1a2e", relief="flat", padx=10, pady=9,
                   cursor="hand2").pack(side="left", padx=4)
 
-        tk.Button(btn_frame, text="✕",
+        tk.Button(btn_frame, text="✕  Fechar",
                   command=root.destroy,
-                  font=("Courier New", 10), fg="#555555",
+                  font=("Courier New", 9), fg="#555555",
                   bg="#1e1e1e", relief="flat", padx=10, pady=9,
-                  cursor="hand2").pack(side="right", padx=20)
+                  cursor="hand2").pack(side="right", padx=18)
 
         root.mainloop()
 
@@ -200,11 +366,8 @@ def fetch_opportunities(url):
 
 # ─── Loop principal ───────────────────────────────────────────────────────────
 def monitor(dashboard_url, min_grades):
-    seen = set()   # sinais já alertados nesta sessão
-
-    # Ativa cores ANSI no Windows
-    import os
-    os.system("color")
+    seen = set()
+    os.system("color")   # ativa cores ANSI no Windows
 
     print(f"""
 {CYAN}{BOLD}╔══════════════════════════════════════════════════════╗
@@ -230,23 +393,19 @@ def monitor(dashboard_url, min_grades):
                 grade = opp.get("grade", "C")
                 if grade not in min_grades:
                     continue
-                # chave única: par + direção + grade (reseta quando o sinal muda)
                 key = f"{opp['symbol']}|{opp['direction']}|{grade}"
                 if key not in seen:
                     seen.add(key)
-                    if not first_run:          # não alerta na carga inicial
+                    if not first_run:
                         new_alerts.append(opp)
 
-            # Limpa sinais que saíram da lista (par mudou de direção, etc.)
+            # Remove sinais expirados
             active_keys = {
                 f"{o['symbol']}|{o['direction']}|{o.get('grade','C')}"
                 for o in opps if o.get("grade") in min_grades
             }
-            expired = seen - active_keys
-            if expired:
-                seen -= expired
+            seen -= (seen - active_keys)
 
-            # ── Exibe novos alertas ──────────────────────────────────────────
             if new_alerts:
                 for opp in new_alerts:
                     is_long = opp["direction"] == "LONG"
@@ -261,20 +420,13 @@ def monitor(dashboard_url, min_grades):
                           f"{DIM}ADX:{R} {opp.get('adx','—')}  "
                           f"{DIM}Conf:{R} {opp.get('confidence','—')}%  "
                           f"{DIM}Estrutura:{R} {opp.get('market_structure','—')}")
-                    threading.Thread(
-                        target=beep, args=(opp.get("grade","B"),), daemon=True
-                    ).start()
-                    threading.Thread(
-                        target=show_popup, args=(opp, dashboard_url), daemon=False
-                    ).start()
+                    threading.Thread(target=beep, args=(opp.get("grade","B"),), daemon=True).start()
+                    threading.Thread(target=show_popup, args=(opp, dashboard_url), daemon=False).start()
             else:
-                # status silencioso na linha (sobrescreve)
                 active_count = len([o for o in opps if o.get("grade") in min_grades])
-                total = len(opps)
-                line = (f"\r  {DIM}[{ts}]{R} {total} oportunidades totais  "
-                        f"| {active_count} de grade {'/'.join(min_grades)}  "
-                        f"| última atualização: {last_update}   ")
-                print(line, end="", flush=True)
+                print(f"\r  {DIM}[{ts}]{R} {len(opps)} oportunidades  "
+                      f"| {active_count} de grade {'/'.join(min_grades)}  "
+                      f"| última atualização: {last_update}   ", end="", flush=True)
 
             first_run = False
 
@@ -290,13 +442,12 @@ def monitor(dashboard_url, min_grades):
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Monitor de sinais do CryptoFutures Dashboard")
-    parser.add_argument("--local",  action="store_true",
+    parser = argparse.ArgumentParser(description="Monitor de sinais do CryptoFutures Dashboard")
+    parser.add_argument("--local",    action="store_true",
                         help="Monitora localhost:5000 em vez do servidor Render")
-    parser.add_argument("--url",    default=None,
+    parser.add_argument("--url",      default=None,
                         help="URL customizada do dashboard")
-    parser.add_argument("--grade",  default=",".join(DEFAULT_GRADES),
+    parser.add_argument("--grade",    default=",".join(DEFAULT_GRADES),
                         help=f"Grades a monitorar (ex: S,A,B)  padrão: {','.join(DEFAULT_GRADES)}")
     parser.add_argument("--interval", type=int, default=CHECK_INTERVAL,
                         help=f"Intervalo de verificação em segundos (padrão: {CHECK_INTERVAL})")
