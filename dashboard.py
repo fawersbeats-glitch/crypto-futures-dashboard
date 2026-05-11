@@ -692,7 +692,7 @@ IS_CLOUD = bool(os.environ.get("RENDER") or os.environ.get("PORT"))
 # Cloud-optimized: 6 pairs, 100 candles, no extra API calls (FR/OI)
 CLOUD_TOP_PAIRS   = 6
 CLOUD_CANDLES     = 100
-CLOUD_INTERVAL    = 600  # scan every 10 min on free tier
+CLOUD_INTERVAL    = 60   # scan every 1 min
 CLOUD_SLEEP       = 1.5  # seconds between pairs (yield CPU)
 
 def scan_loop():
@@ -1106,7 +1106,7 @@ function update(data){
   }
 
   // Countdown
-  const pct=(data.next_update/""" + str(UPDATE_INTERVAL_SECONDS) + r""")*100;
+  const pct=(data.next_update/""" + str(CLOUD_INTERVAL if IS_CLOUD else UPDATE_INTERVAL_SECONDS) + r""")*100;
   document.getElementById('countdown-bar').style.width=pct+'%';
   const m=Math.floor(data.next_update/60),s=data.next_update%60;
   document.getElementById('cd-time').textContent=`${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
