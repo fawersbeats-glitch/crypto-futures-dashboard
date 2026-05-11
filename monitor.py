@@ -12,10 +12,16 @@ Uso:
 Sem instalação extra — usa apenas bibliotecas padrão do Python.
 """
 
-import sys, json, os, time, threading, webbrowser, argparse
+import sys, json, os, time, threading, webbrowser, argparse, urllib.parse
 from datetime import datetime
-from urllib.request import urlopen
+from urllib.request import urlopen, Request
 from urllib.error import URLError
+
+# Força UTF-8 no terminal Windows
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  CONFIGURAÇÃO  (edite aqui conforme preferir)
@@ -26,6 +32,10 @@ CHECK_INTERVAL  = 60          # segundos entre verificações
 DEFAULT_GRADES  = ["S", "A"]  # grades que disparam o alerta
 BINANCE_BASE    = "https://www.binance.com/futures/{symbol}USDT"
 CONFIG_FILE     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monitor_config.json")
+
+# ─── Telegram (preenche após criar o bot com @BotFather) ──────────────────────
+TELEGRAM_TOKEN   = ""   # ex: "7123456789:AAFxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+TELEGRAM_CHAT_ID = ""   # preenchido automaticamente pelo --setup-telegram
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Cores ANSI para terminal Windows 10+
@@ -68,6 +78,149 @@ def parse_min_leverage(lev_str):
         return int(str(lev_str).replace("x", "").split("-")[0])
     except Exception:
         return 3
+
+# ─── Telegram ────────────────────────────────────────────────────────────────
+def _tg_token():
+    """Retorna o token do Telegram (variável global ou monitor_config.json)."""
+    if TELEGRAM_TOKEN:
+        return TELEGRAM_TOKEN
+    cfg = load_config()
+    return cfg.get("telegram_token", "")
+
+def _tg_chat_id():
+    if TELEGRAM_CHAT_ID:
+        return TELEGRAM_CHAT_ID
+    cfg = load_config()
+    return cfg.get("telegram_chat_id", "")
+
+def send_telegram(opp):
+    """Envia alerta no Telegram com botão para abrir a Binance no celular."""
+    token   = _tg_token()
+    chat_id = _tg_chat_id()
+    if not token or not chat_id:
+        return   # Telegram não configurado — ignora silenciosamente
+
+    is_long = opp["direction"] == "LONG"
+    symbol  = opp["name"].replace("/","").replace(":USDT","").replace("USDT","")
+    binance_url = BINANCE_BASE.format(symbol=symbol)
+
+    grade_emoji = {"S": "🏆", "A": "⭐", "B": "🔵"}.get(opp.get("grade","C"), "⚪")
+    dir_emoji   = "🟢 LONG" if is_long else "🔴 SHORT"
+
+    # Top 4 sinais formatados
+    sigs = opp.get("signals", [])[:4]
+    sig_lines = "\n".join(
+        f"{'◈' if s.get('tier',1)>=3 else '◆'} {s['msg']}" for s in sigs
+    )
+
+    text = (
+        f"{grade_emoji} *SINAL {opp.get('grade')} — {opp['name']}/USDT*\n"
+        f"{dir_emoji}  •  Confiança: {opp.get('confidence')}%\n\n"
+        f"💰 Entrada:      `{fmt(opp['entry'])}`\n"
+        f"🛑 Stop Loss:    `{fmt(opp['stop_loss'])}`\n"
+        f"🎯 TP1:          `{fmt(opp['tp1'])}` _(R/R {opp['rr1']}:1)_\n"
+        f"🎯 TP2:          `{fmt(opp['tp2'])}` _(R/R {opp['rr2']}:1)_\n"
+        f"⚡ Alavancagem:  `{opp.get('leverage','—')}`\n"
+        f"📊 RSI: `{opp.get('rsi')}` | ADX: `{opp.get('adx')}`\n"
+        f"🏗 Estrutura:    `{opp.get('market_structure','—')}`\n\n"
+        f"*Sinais detectados:*\n{sig_lines}"
+    )
+
+    payload = json.dumps({
+        "chat_id":    chat_id,
+        "text":       text,
+        "parse_mode": "Markdown",
+        "reply_markup": {
+            "inline_keyboard": [[
+                {"text": f"🚀 Abrir Binance — {opp['name'].split('/')[0]}/USDT",
+                 "url": binance_url}
+            ]]
+        }
+    }).encode("utf-8")
+
+    try:
+        req = Request(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urlopen(req, timeout=10) as r:
+            resp = json.loads(r.read())
+            if resp.get("ok"):
+                print(f"  {GREEN}[Telegram] Mensagem enviada para o celular!{R}")
+            else:
+                print(f"  {YELLOW}[Telegram] Resposta inesperada: {resp}{R}")
+    except Exception as e:
+        print(f"  {YELLOW}[Telegram erro] {e}{R}")
+
+def setup_telegram():
+    """Guia interativo para configurar o bot do Telegram."""
+    print(f"""
+{CYAN}{BOLD}  Configuração do Bot Telegram{R}
+  {DIM}─────────────────────────────────────────{R}
+
+  1. Abra o Telegram e busque por {BOLD}@BotFather{R}
+  2. Envie {BOLD}/newbot{R} e siga as instruções
+  3. Copie o token que o BotFather enviou
+     (formato: 7123456789:AAFxxxxxxxxxxxxxxxxxxxxx)
+""")
+    token = input("  Cole o token aqui: ").strip()
+    if not token:
+        print(f"  {YELLOW}Token vazio. Abortando.{R}")
+        return
+
+    print(f"""
+  Agora:
+  4. Abra o Telegram, busque pelo seu bot ({BOLD}@seubot_username{R})
+  5. Envie qualquer mensagem para ele (ex: /start)
+""")
+    input("  Pressione Enter quando tiver enviado a mensagem... ")
+
+    # Busca o chat_id via getUpdates
+    try:
+        with urlopen(f"https://api.telegram.org/bot{token}/getUpdates", timeout=10) as r:
+            data = json.loads(r.read())
+    except Exception as e:
+        print(f"  {RED}[Erro] Não foi possível conectar: {e}{R}")
+        return
+
+    updates = data.get("result", [])
+    if not updates:
+        print(f"  {YELLOW}Nenhuma mensagem encontrada. Envie uma mensagem para o bot e tente novamente.{R}")
+        return
+
+    chat_id = str(updates[-1]["message"]["chat"]["id"])
+    name    = updates[-1]["message"]["chat"].get("first_name", "")
+    print(f"\n  {GREEN}✓ Chat ID encontrado: {chat_id}  (olá, {name}!){R}")
+
+    # Salva no config
+    cfg = load_config()
+    cfg["telegram_token"]   = token
+    cfg["telegram_chat_id"] = chat_id
+    save_config(cfg)
+
+    # Atualiza variáveis globais
+    global TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+    TELEGRAM_TOKEN   = token
+    TELEGRAM_CHAT_ID = chat_id
+
+    # Envia mensagem de teste
+    test_opp = {
+        "name": "BTC", "direction": "LONG", "grade": "S", "confidence": 82,
+        "entry": 67420.0, "stop_loss": 66850.0, "tp1": 68500.0, "tp2": 69800.0,
+        "rr1": 1.9, "rr2": 4.1, "leverage": "3-5x", "rsi": 54.2, "adx": 31.5,
+        "market_structure": "ALTA",
+        "signals": [
+            {"msg": "EMA stack bullish completa", "tier": 3},
+            {"msg": "Zona de Desconto (38%)", "tier": 3},
+            {"msg": "Order Block Bullish válido", "tier": 2},
+        ]
+    }
+    print(f"\n  Enviando mensagem de teste...")
+    send_telegram(test_opp)
+    print(f"\n  {GREEN}✓ Configuração concluída!{R}")
+    print(f"  Token e Chat ID salvos em {CONFIG_FILE}")
+    print(f"  Execute {BOLD}python monitor.py{R} para iniciar o monitoramento.\n")
 
 # ─── Som de alerta (Windows built-in) ────────────────────────────────────────
 def beep(grade):
@@ -367,12 +520,12 @@ def fetch_opportunities(url):
 # ─── Loop principal ───────────────────────────────────────────────────────────
 def monitor(dashboard_url, min_grades):
     seen = set()
-    os.system("color")   # ativa cores ANSI no Windows
+    os.system("chcp 65001 > nul && color")  # UTF-8 + cores ANSI no Windows
 
     print(f"""
-{CYAN}{BOLD}╔══════════════════════════════════════════════════════╗
-║   ⬡  CryptoFutures — Monitor de Sinais              ║
-╚══════════════════════════════════════════════════════╝{R}
+{CYAN}{BOLD}+======================================================+
+|   *  CryptoFutures -- Monitor de Sinais             |
++======================================================+{R}
 
   {DIM}Dashboard :{R} {dashboard_url}
   {DIM}Grades    :{R} {BOLD}{', '.join(min_grades)}{R}
@@ -422,6 +575,7 @@ def monitor(dashboard_url, min_grades):
                           f"{DIM}Estrutura:{R} {opp.get('market_structure','—')}")
                     threading.Thread(target=beep, args=(opp.get("grade","B"),), daemon=True).start()
                     threading.Thread(target=show_popup, args=(opp, dashboard_url), daemon=False).start()
+                    threading.Thread(target=send_telegram, args=(opp,), daemon=True).start()
             else:
                 active_count = len([o for o in opps if o.get("grade") in min_grades])
                 print(f"\r  {DIM}[{ts}]{R} {len(opps)} oportunidades  "
@@ -443,15 +597,23 @@ def monitor(dashboard_url, min_grades):
 # ─── Entry point ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Monitor de sinais do CryptoFutures Dashboard")
-    parser.add_argument("--local",    action="store_true",
+    parser.add_argument("--local",          action="store_true",
                         help="Monitora localhost:5000 em vez do servidor Render")
-    parser.add_argument("--url",      default=None,
+    parser.add_argument("--url",            default=None,
                         help="URL customizada do dashboard")
-    parser.add_argument("--grade",    default=",".join(DEFAULT_GRADES),
+    parser.add_argument("--grade",          default=",".join(DEFAULT_GRADES),
                         help=f"Grades a monitorar (ex: S,A,B)  padrão: {','.join(DEFAULT_GRADES)}")
-    parser.add_argument("--interval", type=int, default=CHECK_INTERVAL,
+    parser.add_argument("--interval",       type=int, default=CHECK_INTERVAL,
                         help=f"Intervalo de verificação em segundos (padrão: {CHECK_INTERVAL})")
+    parser.add_argument("--setup-telegram", action="store_true",
+                        help="Guia de configuração do bot Telegram")
     args = parser.parse_args()
+
+    # Modo setup Telegram
+    if args.setup_telegram:
+        os.system("chcp 65001 > nul && color")
+        setup_telegram()
+        sys.exit(0)
 
     url    = args.url or (DASHBOARD_LOCAL if args.local else DASHBOARD_CLOUD)
     grades = [g.strip().upper() for g in args.grade.split(",")]
