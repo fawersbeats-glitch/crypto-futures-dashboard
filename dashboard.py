@@ -317,15 +317,13 @@ def analyze_pair(exchange, symbol, timeframe):
     except: return None
 
 def get_top_symbols(exchange):
-    try:
-        markets=exchange.load_markets()
-        tickers=exchange.fetch_tickers()
-        futures=[s for s,m in markets.items()
-                 if m.get("quote")==QUOTE_ASSET
-                 and m.get("type") in("future","swap","linear") and s in tickers]
-        futures.sort(key=lambda s:tickers[s].get("quoteVolume") or 0,reverse=True)
-        return futures[:TOP_PAIRS]
-    except: return []
+    markets = exchange.load_markets()
+    tickers = exchange.fetch_tickers()
+    futures = [s for s,m in markets.items()
+               if m.get("quote")==QUOTE_ASSET
+               and m.get("type") in("future","swap","linear") and s in tickers]
+    futures.sort(key=lambda s:tickers[s].get("quoteVolume") or 0, reverse=True)
+    return futures[:TOP_PAIRS]
 
 # ─── Global state ─────────────────────────────────────────────────────────────
 state = {
@@ -338,16 +336,40 @@ state = {
 }
 state_lock = threading.Lock()
 
+def make_exchange():
+    return getattr(ccxt, EXCHANGE_ID)({
+        "enableRateLimit": True,
+        "timeout": 20000,
+        "options": {"defaultType": "future"},
+    })
+
 def scan_loop():
-    exchange = getattr(ccxt, EXCHANGE_ID)({"enableRateLimit":True,"options":{"defaultType":"future"}})
+    exchange = make_exchange()
     while True:
-        with state_lock: state["scanning"] = True; state["current_pair"] = "Conectando..."
-        symbols = get_top_symbols(exchange)
+        with state_lock:
+            state["scanning"] = True
+            state["current_pair"] = "Conectando à Binance..."
+        try:
+            symbols = get_top_symbols(exchange)
+        except Exception:
+            symbols = []
+
+        if not symbols:
+            with state_lock:
+                state["current_pair"] = "Falha na conexão — tentando novamente em 30s"
+                state["scanning"] = False
+            time.sleep(30)
+            exchange = make_exchange()
+            continue
+
         results = []
         for sym in symbols:
             with state_lock: state["current_pair"] = sym; state["total_scanned"] += 1
-            r = analyze_pair(exchange, sym, TIMEFRAME)
-            if r: results.append(r)
+            try:
+                r = analyze_pair(exchange, sym, TIMEFRAME)
+                if r: results.append(r)
+            except Exception:
+                pass
         results.sort(key=lambda x: x["score"], reverse=True)
         with state_lock:
             state["opportunities"]  = results
