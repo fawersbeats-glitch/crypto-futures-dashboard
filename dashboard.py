@@ -141,10 +141,11 @@ def fmtp(v):
 def clean(s):
     return s.replace("/USDT:USDT","").replace(":USDT","").replace("/USDT","")
 
-def analyze_pair(exchange, symbol, timeframe):
+def analyze_pair(exchange, symbol, timeframe, candle_limit=None, skip_extra_calls=False):
     try:
-        ohlcv=exchange.fetch_ohlcv(symbol,timeframe,limit=LIMIT_CANDLES)
-        if len(ohlcv)<100: return None
+        limit = candle_limit or LIMIT_CANDLES
+        ohlcv=exchange.fetch_ohlcv(symbol,timeframe,limit=limit)
+        if len(ohlcv)<60: return None
         df=pd.DataFrame(ohlcv,columns=["ts","open","high","low","close","volume"])
         c,h,l,v=df["close"],df["high"],df["low"],df["volume"]
         price=float(c.iloc[-1])
@@ -176,18 +177,19 @@ def analyze_pair(exchange, symbol, timeframe):
         bfvg,sfvg=detect_fvg(df)
         div=rsi_divergence(c,rsi_s)
         funding_rate=None
-        try:
-            fr=exchange.fetch_funding_rate(symbol)
-            funding_rate=float(fr.get("fundingRate",0) or 0)
-        except: pass
         oi_signal=None
-        try:
-            oi=exchange.fetch_open_interest_history(symbol,timeframe,limit=3)
-            if oi and len(oi)>=2:
-                on=float(oi[-1].get("openInterestValue",0) or 0)
-                op=float(oi[-2].get("openInterestValue",0) or 1)
-                oi_signal=(on-op)/op if op>0 else 0
-        except: pass
+        if not skip_extra_calls:
+            try:
+                fr=exchange.fetch_funding_rate(symbol)
+                funding_rate=float(fr.get("fundingRate",0) or 0)
+            except: pass
+            try:
+                oi=exchange.fetch_open_interest_history(symbol,timeframe,limit=3)
+                if oi and len(oi)>=2:
+                    on=float(oi[-1].get("openInterestValue",0) or 0)
+                    op=float(oi[-2].get("openInterestValue",0) or 1)
+                    oi_signal=(on-op)/op if op>0 else 0
+            except: pass
 
         ls,ss=[],[]
         def la(k,m): ls.append({"key":k,"msg":m,"tier":WEIGHTS.get(k,1)})
@@ -369,17 +371,26 @@ def make_exchange():
     return getattr(ccxt, EXCHANGE_ID)(opts)
 
 IS_CLOUD = bool(os.environ.get("RENDER") or os.environ.get("PORT"))
-CLOUD_TOP_PAIRS = 12  # fewer pairs on free-tier (0.1 vCPU)
+
+# Cloud-optimized: 6 pairs, 100 candles, no extra API calls (FR/OI)
+CLOUD_TOP_PAIRS   = 6
+CLOUD_CANDLES     = 100
+CLOUD_INTERVAL    = 600  # scan every 10 min on free tier
+CLOUD_SLEEP       = 1.5  # seconds between pairs (yield CPU)
 
 def scan_loop():
-    exchange = make_exchange()
-    pairs_limit = CLOUD_TOP_PAIRS if IS_CLOUD else TOP_PAIRS
+    exchange  = make_exchange()
+    pairs_lim = CLOUD_TOP_PAIRS if IS_CLOUD else TOP_PAIRS
+    candles   = CLOUD_CANDLES   if IS_CLOUD else LIMIT_CANDLES
+    interval  = CLOUD_INTERVAL  if IS_CLOUD else UPDATE_INTERVAL_SECONDS
+    sleep_gap = CLOUD_SLEEP     if IS_CLOUD else 0
+
     while True:
         with state_lock:
             state["scanning"] = True
             state["current_pair"] = "Conectando..."
         try:
-            symbols = get_top_symbols(exchange)[:pairs_limit]
+            symbols = get_top_symbols(exchange)[:pairs_lim]
         except Exception:
             symbols = []
 
@@ -395,19 +406,21 @@ def scan_loop():
         for sym in symbols:
             with state_lock: state["current_pair"] = sym; state["total_scanned"] += 1
             try:
-                r = analyze_pair(exchange, sym, TIMEFRAME)
+                r = analyze_pair(exchange, sym, TIMEFRAME,
+                                 candle_limit=candles, skip_extra_calls=IS_CLOUD)
                 if r: results.append(r)
             except Exception:
                 pass
-            time.sleep(0.3)  # yield CPU to gunicorn worker threads
+            if sleep_gap:
+                time.sleep(sleep_gap)  # yield CPU to gunicorn worker threads
         results.sort(key=lambda x: x["score"], reverse=True)
         with state_lock:
             state["opportunities"]  = results
             state["last_update"]    = datetime.now().strftime("%H:%M:%S  %d/%m/%Y")
             state["scanning"]       = False
             state["current_pair"]   = ""
-            state["next_update"]    = UPDATE_INTERVAL_SECONDS
-        for _ in range(UPDATE_INTERVAL_SECONDS):
+            state["next_update"]    = interval
+        for _ in range(interval):
             time.sleep(1)
             with state_lock:
                 state["next_update"] = max(0, state["next_update"] - 1)
