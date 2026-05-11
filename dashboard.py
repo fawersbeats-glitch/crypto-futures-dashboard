@@ -116,19 +116,36 @@ def rsi_divergence(price,rsi_s,lookback=20):
     return None
 
 WEIGHTS = {
-    "market_structure":3,"ichimoku_cloud":3,"mtf_alignment":3,
-    "order_block":2,"fair_value_gap":2,"vwap_confluence":2,
-    "fibonacci_zone":2,"funding_rate":2,"adx_trend":2,"rsi_divergence":2,
-    "macd_momentum":1,"bollinger_squeeze":1,"rsi_extreme":1,
-    "ema_alignment":1,"volume_confirm":1,"stochrsi_extreme":1,
+    # ── TIER 1: Estrutura — base obrigatória (fundamentos da operação) ──────────
+    "market_structure": 4,   # HH+HL / LH+LL — Dow Theory + ICT
+    "ema_alignment":    4,   # Alinhamento completo da stack EMA
+    "discount_zone":    3,   # Zona de desconto/premium (SMC equilibrium)
+
+    # ── TIER 2: Zonas institucionais — onde smart money opera ──────────────────
+    "order_block":      3,   # Order Block válido no sentido do trade
+    "fvg":              2,   # Fair Value Gap / Imbalance como suporte/resistência
+    "ichimoku_cloud":   2,   # Nuvem + cruzamento TK (tendência multi-dimensional)
+    "bos_signal":       2,   # Break of Structure — confirmação de bias
+
+    # ── TIER 3: Confirmação de momentum ────────────────────────────────────────
+    "rsi_quality":      2,   # RSI em zona ideal (não sobrecomprado/vendido)
+    "macd_momentum":    2,   # MACD direção + aceleração do histograma
+    "adx_trend":        2,   # ADX > 25 = tendência real
+    "fibonacci_zone":   2,   # Confluência Fibonacci golden pocket
+    "volume_confirm":   1,   # Volume confirmando movimento
+    "vwap_confluence":  1,   # Posição relativa ao VWAP institucional
+
+    # ── TIER 4: Sentimento — crypto-específico ─────────────────────────────────
+    "funding_rate":     2,   # Contrarian: funding negativo = pressão vendida = long
+    "open_interest":    1,   # OI crescente confirma tendência
 }
 MAX_SCORE = sum(WEIGHTS.values())
 
 def grade(score):
-    p=score/MAX_SCORE
-    if p>=.65: return "S"
-    if p>=.45: return "A"
-    if p>=.30: return "B"
+    p = score / MAX_SCORE
+    if p >= .67: return "S"   # ≥ 67%: setup institucional de alta convicção
+    if p >= .50: return "A"   # ≥ 50%: confluência forte — operar
+    if p >= .35: return "B"   # ≥ 35%: sinal moderado — tamanho reduzido
     return "C"
 
 def fmtp(v):
@@ -191,114 +208,248 @@ def analyze_pair(exchange, symbol, timeframe, candle_limit=None, skip_extra_call
                     oi_signal=(on-op)/op if op>0 else 0
             except: pass
 
-        ls,ss=[],[]
-        def la(k,m): ls.append({"key":k,"msg":m,"tier":WEIGHTS.get(k,1)})
+        # ── Cálculos adicionais para scoring profissional ───────────────────────
+        # Zona de Desconto/Premium (SMC): range dos últimos 50 candles
+        rng_hi = float(h.iloc[-50:].max()); rng_lo = float(l.iloc[-50:].min())
+        rng    = rng_hi - rng_lo if rng_hi > rng_lo else 1
+        pct_in_range = (price - rng_lo) / rng          # 0 = fundo, 1 = topo
+        in_discount  = pct_in_range <= 0.40             # comprar no desconto
+        in_premium   = pct_in_range >= 0.60             # vender no premium
+
+        # Break of Structure (BOS) — confirmação de mudança de bias
+        bos_bull = (len(sh) >= 2 and price > sh[-2][1]) if sh else False
+        bos_bear = (len(sl) >= 2 and price < sl[-2][1]) if sl else False
+
+        # MACD aceleração do histograma
+        _,_,mh_s = macd(c)
+        mh      = float(mh_s.iloc[-1])
+        mh_prev = float(mh_s.iloc[-2])
+        mh_p2   = float(mh_s.iloc[-3]) if len(mh_s) > 3 else mh_prev
+        macd_cross_bull = mh > 0 and mh_prev <= 0
+        macd_cross_bear = mh < 0 and mh_prev >= 0
+        macd_accel_bull = mh > 0 and mh > mh_prev > mh_p2   # momentum crescendo
+        macd_accel_bear = mh < 0 and mh < mh_prev < mh_p2
+
+        # RSI zona de qualidade (cursos ensinam: operar entre 40-65 para longs)
+        rsi_ideal_long  = 42 <= rsi_val <= 62
+        rsi_ideal_short = 38 <= rsi_val <= 58
+        rsi_recov_long  = 30 <= rsi_val < 42
+        rsi_extended    = rsi_val > 68 or rsi_val < 32  # sobrecomprado/vendido extremo
+
+        # ── Acumulação de pontos (Long e Short em paralelo) ─────────────────────
+        ls, ss = [], []
+        def la(k,m):  ls.append({"key":k,"msg":m,"tier":WEIGHTS.get(k,1)})
         def sa2(k,m): ss.append({"key":k,"msg":m,"tier":WEIGHTS.get(k,1)})
-        lsc=ssc=0
+        lsc = ssc = 0
         def aw(k): return WEIGHTS.get(k,1)
 
-        if ms=="ALTA":        lsc+=aw("market_structure"); la("market_structure","Estrutura de Alta (HH+HL confirmado)")
-        elif ms=="BAIXA":     ssc+=aw("market_structure"); sa2("market_structure","Estrutura de Baixa (LH+LL confirmado)")
-        elif "ALTA" in ms:    lsc+=1; la("market_structure","Transição para Alta")
-        elif "BAIXA" in ms:   ssc+=1; sa2("market_structure","Transição para Baixa")
+        # ── TIER 1: ESTRUTURA ───────────────────────────────────────────────────
+        # Market Structure (Dow Theory + ICT)
+        if ms == "ALTA":
+            lsc += aw("market_structure"); la("market_structure","Estrutura de Alta confirmada (HH+HL)")
+        elif ms == "BAIXA":
+            ssc += aw("market_structure"); sa2("market_structure","Estrutura de Baixa confirmada (LH+LL)")
+        elif "TRANSIÇÃO_ALTA" in ms:
+            lsc += 2; la("market_structure","CHoCH para Alta — possível reversão")
+        elif "TRANSIÇÃO_BAIXA" in ms:
+            ssc += 2; sa2("market_structure","CHoCH para Baixa — possível reversão")
 
-        if cloud_top and cloud_bot:
-            above=price>cloud_top; below=price<cloud_bot
-            tkb=tk_now>kj_now; tkbear=tk_now<kj_now
-            if above and tkb:   lsc+=aw("ichimoku_cloud"); la("ichimoku_cloud","Ichimoku: acima da nuvem + TK bullish")
-            elif above:         lsc+=1; la("ichimoku_cloud","Ichimoku: acima da nuvem")
-            if below and tkbear: ssc+=aw("ichimoku_cloud"); sa2("ichimoku_cloud","Ichimoku: abaixo da nuvem + TK bearish")
-            elif below:         ssc+=1; sa2("ichimoku_cloud","Ichimoku: abaixo da nuvem")
+        # EMA Stack Alignment — quanto mais alinhado, mais forte
+        if price > e8 > e21 > e55 > e200:
+            lsc += aw("ema_alignment"); la("ema_alignment","EMA stack bullish completa (8>21>55>200)")
+        elif price > e21 > e55 > e200:
+            lsc += 3; la("ema_alignment","EMAs 21>55>200 alinhadas bullish")
+        elif price > e55 > e200:
+            lsc += 2; la("ema_alignment","EMAs 55>200 alinhadas — tendência bull")
+        elif price > e200:
+            lsc += 1; la("ema_alignment",f"Acima da EMA200 ({fmtp(e200)})")
+        elif price < e8 < e21 < e55 < e200:
+            ssc += aw("ema_alignment"); sa2("ema_alignment","EMA stack bearish completa (8<21<55<200)")
+        elif price < e21 < e55 < e200:
+            ssc += 3; sa2("ema_alignment","EMAs 21<55<200 alinhadas bearish")
+        elif price < e55 < e200:
+            ssc += 2; sa2("ema_alignment","EMAs 55<200 alinhadas — tendência bear")
+        elif price < e200:
+            ssc += 1; sa2("ema_alignment",f"Abaixo da EMA200 ({fmtp(e200)})")
 
-        if price>e8>e21>e55:   lsc+=aw("mtf_alignment"); la("mtf_alignment","EMAs 8>21>55 alinhadas — tendência forte")
-        elif price<e8<e21<e55: ssc+=aw("mtf_alignment"); sa2("mtf_alignment","EMAs 8<21<55 alinhadas — tendência forte")
-        elif price>e21>e55:    lsc+=1; la("mtf_alignment","EMA 21>55 — tendência moderada")
-        elif price<e21<e55:    ssc+=1; sa2("mtf_alignment","EMA 21<55 — tendência moderada")
+        # Desconto/Premium — entrar no valor, não no extremo
+        if in_discount:
+            lsc += aw("discount_zone"); la("discount_zone",f"Zona de Desconto ({pct_in_range:.0%} do range) — entrada em valor")
+        elif pct_in_range <= 0.50:
+            lsc += 1; la("discount_zone",f"Abaixo do equilíbrio ({pct_in_range:.0%}) — favorável longs")
+        if in_premium:
+            ssc += aw("discount_zone"); sa2("discount_zone",f"Zona de Premium ({pct_in_range:.0%} do range) — entrada em valor")
+        elif pct_in_range >= 0.50:
+            ssc += 1; sa2("discount_zone",f"Acima do equilíbrio ({pct_in_range:.0%}) — favorável shorts")
 
-        if bull_ob and bull_ob["low"]<=price<=bull_ob["high"]*1.01:
-            lsc+=aw("order_block"); la("order_block",f"Order Block Bullish ({fmtp(bull_ob['low'])}–{fmtp(bull_ob['high'])})")
-        if bear_ob and bear_ob["low"]*0.99<=price<=bear_ob["high"]:
-            ssc+=aw("order_block"); sa2("order_block",f"Order Block Bearish ({fmtp(bear_ob['low'])}–{fmtp(bear_ob['high'])})")
+        # ── TIER 2: ZONAS INSTITUCIONAIS ────────────────────────────────────────
+        # Order Block — zona de entrada de smart money
+        if bull_ob:
+            ob_margin = (bull_ob["high"] - bull_ob["low"]) * 0.2
+            if bull_ob["low"] - ob_margin <= price <= bull_ob["high"] + ob_margin:
+                lsc += aw("order_block"); la("order_block",f"Order Block Bullish válido ({fmtp(bull_ob['low'])}–{fmtp(bull_ob['high'])})")
+        if bear_ob:
+            ob_margin = (bear_ob["high"] - bear_ob["low"]) * 0.2
+            if bear_ob["low"] - ob_margin <= price <= bear_ob["high"] + ob_margin:
+                ssc += aw("order_block"); sa2("order_block",f"Order Block Bearish válido ({fmtp(bear_ob['low'])}–{fmtp(bear_ob['high'])})")
 
+        # FVG — imbalance institucional como zona de suporte/resistência
         for fvg in bfvg:
-            if fvg["bottom"]<=price<=fvg["top"]:
-                lsc+=aw("fair_value_gap"); la("fair_value_gap",f"FVG Bullish ({fmtp(fvg['bottom'])}–{fmtp(fvg['top'])})"); break
+            if fvg["bottom"] * 0.998 <= price <= fvg["top"] * 1.002:
+                lsc += aw("fvg"); la("fvg",f"FVG Bullish ({fmtp(fvg['bottom'])}–{fmtp(fvg['top'])}) — imbalance como suporte"); break
         for fvg in sfvg:
-            if fvg["bottom"]<=price<=fvg["top"]:
-                ssc+=aw("fair_value_gap"); sa2("fair_value_gap",f"FVG Bearish ({fmtp(fvg['bottom'])}–{fmtp(fvg['top'])})"); break
+            if fvg["bottom"] * 0.998 <= price <= fvg["top"] * 1.002:
+                ssc += aw("fvg"); sa2("fvg",f"FVG Bearish ({fmtp(fvg['bottom'])}–{fmtp(fvg['top'])}) — imbalance como resistência"); break
 
-        vd=(price-vwap_val)/vwap_val
-        if -0.015<vd<0.002 and price>vwap_val:   lsc+=aw("vwap_confluence"); la("vwap_confluence",f"Pullback ao VWAP ({fmtp(vwap_val)}) — suporte institucional")
-        elif -0.002<vd<0.015 and price<vwap_val: ssc+=aw("vwap_confluence"); sa2("vwap_confluence",f"Rejeição do VWAP ({fmtp(vwap_val)}) — resistência institucional")
-        elif price>vwap_val: lsc+=1; la("vwap_confluence",f"Acima do VWAP ({fmtp(vwap_val)})")
-        else: ssc+=1; sa2("vwap_confluence",f"Abaixo do VWAP ({fmtp(vwap_val)})")
+        # Ichimoku — sistema multi-dimensional japonês
+        if cloud_top and cloud_bot:
+            above = price > cloud_top; below = price < cloud_bot
+            tkb = tk_now > kj_now
+            if above and tkb:
+                lsc += aw("ichimoku_cloud"); la("ichimoku_cloud","Ichimoku: acima da nuvem + TK bullish — tendência forte")
+            elif above:
+                lsc += 1; la("ichimoku_cloud","Ichimoku: acima da nuvem")
+            if below and not tkb:
+                ssc += aw("ichimoku_cloud"); sa2("ichimoku_cloud","Ichimoku: abaixo da nuvem + TK bearish — tendência forte")
+            elif below:
+                ssc += 1; sa2("ichimoku_cloud","Ichimoku: abaixo da nuvem")
 
-        if fib_near:
-            w=aw("fibonacci_zone") if fib_near in ("0.382","0.500","0.618","0.650") else 1
-            lbl=f"Golden Pocket Fib {fib_near}" if fib_near in ("0.618","0.650") else f"Fibonacci {fib_near}"
-            if price<rhi*0.98: lsc+=w; la("fibonacci_zone",lbl+f" ({fmtp(fr_levels[fib_near])})")
-            else: ssc+=w; sa2("fibonacci_zone",lbl+f" ({fmtp(fr_levels[fib_near])})")
+        # Break of Structure — confirmação de mudança de caráter
+        if bos_bull:
+            lsc += aw("bos_signal"); la("bos_signal",f"BOS Bullish — rompeu swing high anterior ({fmtp(sh[-2][1] if len(sh)>=2 else 0)})")
+        if bos_bear:
+            ssc += aw("bos_signal"); sa2("bos_signal",f"BOS Bearish — rompeu swing low anterior ({fmtp(sl[-2][1] if len(sl)>=2 else 0)})")
 
-        if funding_rate is not None:
-            if funding_rate>0.001:    ssc+=aw("funding_rate"); sa2("funding_rate",f"Funding Rate {funding_rate*100:.4f}% — longs pagando")
-            elif funding_rate<-0.001: lsc+=aw("funding_rate"); la("funding_rate",f"Funding Rate {funding_rate*100:.4f}% — shorts pagando")
-            elif funding_rate>0.0005: ssc+=1; sa2("funding_rate",f"Funding Rate {funding_rate*100:.4f}% (levemente positivo)")
+        # ── TIER 3: CONFIRMAÇÃO DE MOMENTUM ─────────────────────────────────────
+        # RSI — zona de qualidade (não entrar em extremos esgotados)
+        if rsi_ideal_long:
+            lsc += aw("rsi_quality"); la("rsi_quality",f"RSI {rsi_val:.1f} — zona ideal long (40-62), momentum saudável")
+        elif rsi_recov_long:
+            lsc += 1; la("rsi_quality",f"RSI {rsi_val:.1f} — recuperando de oversold")
+        if rsi_ideal_short:
+            ssc += aw("rsi_quality"); sa2("rsi_quality",f"RSI {rsi_val:.1f} — zona ideal short (38-58), momentum saudável")
+        elif rsi_val > 62 and not rsi_extended:
+            ssc += 1; sa2("rsi_quality",f"RSI {rsi_val:.1f} — acima do equilíbrio")
 
-        if adx_now>25:
-            if pdi_now>mdi_now: lsc+=aw("adx_trend"); la("adx_trend",f"ADX {adx_now:.0f} — +DI>{mdi_now:.0f} tendência alta")
-            else: ssc+=aw("adx_trend"); sa2("adx_trend",f"ADX {adx_now:.0f} — -DI>+DI tendência baixa")
+        # MACD — direção + aceleração do histograma
+        if macd_cross_bull:
+            lsc += aw("macd_momentum"); la("macd_momentum","MACD cruzamento bullish — momentum virando")
+        elif macd_accel_bull:
+            lsc += aw("macd_momentum"); la("macd_momentum","MACD acelerando para cima — momentum crescendo")
+        elif mh > 0:
+            lsc += 1; la("macd_momentum","MACD histograma positivo")
+        if macd_cross_bear:
+            ssc += aw("macd_momentum"); sa2("macd_momentum","MACD cruzamento bearish — momentum virando")
+        elif macd_accel_bear:
+            ssc += aw("macd_momentum"); sa2("macd_momentum","MACD acelerando para baixo — momentum crescendo")
+        elif mh < 0:
+            ssc += 1; sa2("macd_momentum","MACD histograma negativo")
 
-        if div=="BULLISH":  lsc+=aw("rsi_divergence"); la("rsi_divergence","Divergência Bullish RSI — reversão provável")
-        elif div=="BEARISH": ssc+=aw("rsi_divergence"); sa2("rsi_divergence","Divergência Bearish RSI — reversão provável")
+        # ADX — confirma existência de tendência (não direção)
+        if adx_now >= 40:
+            if pdi_now > mdi_now: lsc += aw("adx_trend"); la("adx_trend",f"ADX {adx_now:.0f} — tendência forte (+DI dominante)")
+            else:                 ssc += aw("adx_trend"); sa2("adx_trend",f"ADX {adx_now:.0f} — tendência forte (-DI dominante)")
+        elif adx_now >= 25:
+            if pdi_now > mdi_now: lsc += 1; la("adx_trend",f"ADX {adx_now:.0f} — tendência moderada")
+            else:                 ssc += 1; sa2("adx_trend",f"ADX {adx_now:.0f} — tendência moderada")
 
-        if mh>0 and mh_prev<0: lsc+=aw("macd_momentum"); la("macd_momentum","MACD cruzamento bullish")
-        elif mh>0:              lsc+=aw("macd_momentum"); la("macd_momentum","MACD histograma positivo")
-        elif mh<0 and mh_prev>0: ssc+=aw("macd_momentum"); sa2("macd_momentum","MACD cruzamento bearish")
-        elif mh<0:               ssc+=aw("macd_momentum"); sa2("macd_momentum","MACD histograma negativo")
+        # Fibonacci — Golden Pocket (0.618-0.65) é o mais respeitado pelo mercado
+        rhi2, rlo2 = float(h.iloc[-60:].max()), float(l.iloc[-60:].min())
+        fr2 = fib_ret(rhi2, rlo2)
+        fib_near2 = next((k for k,val in fr2.items() if abs(price-val)/max(price,0.001)<0.01), None)
+        if fib_near2:
+            is_golden = fib_near2 in ("0.618","0.650")
+            w = aw("fibonacci_zone") if is_golden else 1
+            lbl = f"Golden Pocket {fib_near2}" if is_golden else f"Fibonacci {fib_near2}"
+            if pct_in_range < 0.6:
+                lsc += w; la("fibonacci_zone",f"{lbl} ({fmtp(fr2[fib_near2])}) — suporte Fibonacci")
+            else:
+                ssc += w; sa2("fibonacci_zone",f"{lbl} ({fmtp(fr2[fib_near2])}) — resistência Fibonacci")
 
-        if bb_pos<0.15:  lsc+=aw("bollinger_squeeze"); la("bollinger_squeeze",f"Bollinger abaixo da banda ({bb_pos:.0%})")
-        elif bb_pos>0.85: ssc+=aw("bollinger_squeeze"); sa2("bollinger_squeeze",f"Bollinger acima da banda ({bb_pos:.0%})")
+        # Volume — só conta se confirmar o movimento
+        if vol_ratio >= 2.0:
+            if mh > 0: lsc += aw("volume_confirm"); la("volume_confirm",f"Volume {vol_ratio:.1f}x acima da média — compradores dominando")
+            else:      ssc += aw("volume_confirm"); sa2("volume_confirm",f"Volume {vol_ratio:.1f}x acima da média — vendedores dominando")
+        elif vol_ratio >= 1.3:
+            if mh > 0: lsc += 1; la("volume_confirm",f"Volume {vol_ratio:.1f}x — levemente acima da média")
+            else:      ssc += 1; sa2("volume_confirm",f"Volume {vol_ratio:.1f}x — levemente acima da média")
 
-        if rsi_val<35:   lsc+=aw("rsi_extreme"); la("rsi_extreme",f"RSI {rsi_val:.1f} — sobrevendido")
-        elif rsi_val>65: ssc+=aw("rsi_extreme"); sa2("rsi_extreme",f"RSI {rsi_val:.1f} — sobrecomprado")
-
-        if price>e200*1.001:   lsc+=aw("ema_alignment"); la("ema_alignment",f"Acima da EMA200 ({fmtp(e200)})")
-        elif price<e200*0.999: ssc+=aw("ema_alignment"); sa2("ema_alignment",f"Abaixo da EMA200 ({fmtp(e200)})")
-
-        if vol_ratio>1.5:
-            if mh>0: lsc+=aw("volume_confirm"); la("volume_confirm",f"Volume {vol_ratio:.1f}x — confirmando alta")
-            else:    ssc+=aw("volume_confirm"); sa2("volume_confirm",f"Volume {vol_ratio:.1f}x — confirmando baixa")
-
-        if stk_val<15:   lsc+=aw("stochrsi_extreme"); la("stochrsi_extreme",f"StochRSI {stk_val:.0f} — oversold extremo")
-        elif stk_val>85: ssc+=aw("stochrsi_extreme"); sa2("stochrsi_extreme",f"StochRSI {stk_val:.0f} — overbought extremo")
-
-        direction="LONG" if lsc>=ssc else "SHORT"
-        score=lsc if direction=="LONG" else ssc
-        signals=ls if direction=="LONG" else ss
-        if score<MIN_SCORE: return None
-
-        conf=min(int(score/MAX_SCORE*100),99)
-        g=grade(score)
-
-        if direction=="LONG":
-            entry=min(price,float(bb_lo.iloc[-1])*1.001)
-            if bull_ob and bull_ob["high"]<price*1.005: entry=max(bull_ob["high"],entry)
-            sl_price=sl[-1][1]*0.998 if sl else entry-atr_val*ATR_MULT_STOP
-            stop_loss=min(sl_price,entry-atr_val*ATR_MULT_STOP)
-            tp1=fe_long.get("1.272",entry+atr_val*ATR_MULT_TP1)
-            tp2=fe_long.get("1.618",entry+atr_val*ATR_MULT_TP2)
+        # VWAP — referência institucional intraday
+        vd = (price - vwap_val) / max(vwap_val, 0.001)
+        if -0.01 <= vd <= 0.005 and price > vwap_val:
+            lsc += aw("vwap_confluence"); la("vwap_confluence",f"Pullback ao VWAP ({fmtp(vwap_val)}) — suporte institucional")
+        elif price > vwap_val:
+            lsc += 1; la("vwap_confluence",f"Acima do VWAP ({fmtp(vwap_val)})")
+        elif 0.005 >= vd >= -0.01 and price < vwap_val:
+            ssc += aw("vwap_confluence"); sa2("vwap_confluence",f"Rejeição do VWAP ({fmtp(vwap_val)}) — resistência institucional")
         else:
-            entry=max(price,float(bb_up.iloc[-1])*0.999)
-            if bear_ob and bear_ob["low"]>price*0.995: entry=min(bear_ob["low"],entry)
-            sl_price=sh[-1][1]*1.002 if sh else entry+atr_val*ATR_MULT_STOP
-            stop_loss=max(sl_price,entry+atr_val*ATR_MULT_STOP)
-            tp1=fe_short.get("1.272",entry-atr_val*ATR_MULT_TP1)
-            tp2=fe_short.get("1.618",entry-atr_val*ATR_MULT_TP2)
+            ssc += 1; sa2("vwap_confluence",f"Abaixo do VWAP ({fmtp(vwap_val)})")
 
-        risk=abs(entry-stop_loss)
-        rr1=abs(tp1-entry)/risk if risk>0 else 0
-        rr2=abs(tp2-entry)/risk if risk>0 else 0
-        lev=("10-15x" if g=="S" and adx_now>30 else "5-10x" if g in("S","A") else "3-5x" if g=="B" else "2-3x")
+        # ── TIER 4: SENTIMENTO CRYPTO ────────────────────────────────────────────
+        if funding_rate is not None:
+            fr_pct = funding_rate * 100
+            if funding_rate > 0.001:
+                ssc += aw("funding_rate"); sa2("funding_rate",f"Funding {fr_pct:.4f}% — longs pagando shorts (pressão vendida)")
+            elif funding_rate < -0.001:
+                lsc += aw("funding_rate"); la("funding_rate",f"Funding {fr_pct:.4f}% — shorts pagando longs (pressão comprada)")
+            elif abs(funding_rate) < 0.0003:
+                lsc += 1; la("funding_rate",f"Funding neutro ({fr_pct:.4f}%) — sem viés excessivo")
+
+        if oi_signal is not None:
+            if oi_signal > 0.02 and mh > 0:
+                lsc += aw("open_interest"); la("open_interest",f"OI +{oi_signal*100:.1f}% — dinheiro novo entrando na alta")
+            elif oi_signal > 0.02 and mh < 0:
+                ssc += aw("open_interest"); sa2("open_interest",f"OI +{oi_signal*100:.1f}% — dinheiro novo entrando na baixa")
+            elif oi_signal < -0.02:
+                if mh > 0: lsc += 1; la("open_interest","OI caindo com preço subindo — short covering")
+
+        # ── DECISÃO DIRECIONAL ───────────────────────────────────────────────────
+        direction = "LONG" if lsc >= ssc else "SHORT"
+        score     = lsc if direction == "LONG" else ssc
+        signals   = ls  if direction == "LONG" else ss
+        if score < MIN_SCORE: return None
+
+        conf = min(int(score / MAX_SCORE * 100), 99)
+        g    = grade(score)
+
+        # ── GESTÃO DE RISCO PROFISSIONAL ─────────────────────────────────────────
+        # Stop: abaixo/acima da estrutura (swing), não ATR arbitrário
+        # TP: extensões Fibonacci (1.272 e 1.618 são os alvos mais respeitados)
+        fe_long  = fib_ext(rng_hi, rng_lo, "long")
+        fe_short = fib_ext(rng_hi, rng_lo, "short")
+
+        if direction == "LONG":
+            entry = price
+            # Stop abaixo do último swing low ou OB, o que for mais conservador
+            sl_struct = sl[-1][1] * 0.997 if sl else None
+            sl_ob     = bull_ob["low"] * 0.997 if bull_ob else None
+            sl_atr    = entry - atr_val * ATR_MULT_STOP
+            candidates = [x for x in [sl_struct, sl_ob, sl_atr] if x is not None]
+            stop_loss  = max(min(candidates), entry * 0.95)  # max 5% stop
+            tp1 = fe_long.get("1.272", entry + atr_val * ATR_MULT_TP1)
+            tp2 = fe_long.get("1.618", entry + atr_val * ATR_MULT_TP2)
+        else:
+            entry = price
+            sl_struct = sh[-1][1] * 1.003 if sh else None
+            sl_ob     = bear_ob["high"] * 1.003 if bear_ob else None
+            sl_atr    = entry + atr_val * ATR_MULT_STOP
+            candidates = [x for x in [sl_struct, sl_ob, sl_atr] if x is not None]
+            stop_loss  = min(max(candidates), entry * 1.05)  # max 5% stop
+            tp1 = fe_short.get("1.272", entry - atr_val * ATR_MULT_TP1)
+            tp2 = fe_short.get("1.618", entry - atr_val * ATR_MULT_TP2)
+
+        risk = abs(entry - stop_loss)
+        rr1  = round(abs(tp1 - entry) / risk, 2) if risk > 0 else 0
+        rr2  = round(abs(tp2 - entry) / risk, 2) if risk > 0 else 0
+
+        # Filtrar setups com R/R ruim — regra dos profissionais: mínimo 2:1
+        if rr1 < 1.5: return None
+
+        # Alavancagem baseada em convicção e força da tendência
+        if g == "S" and adx_now >= 35:    lev = "5-10x"
+        elif g in ("S","A") and adx_now >= 25: lev = "3-5x"
+        elif g == "B":                     lev = "2-3x"
+        else:                              lev = "1-2x"
         trend="FORTE" if adx_now>40 else "MODERADO" if adx_now>25 else "FRACO"
 
         return dict(
