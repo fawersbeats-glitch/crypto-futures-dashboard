@@ -4,8 +4,8 @@ Edite aqui para personalizar a análise
 """
 
 # ─── Exchange ─────────────────────────────────────────────────────────────────
-EXCHANGE_ID = "binance"    # binance | bybit | okx | kucoin
-QUOTE_ASSET = "USDT"       # USDT | BUSD
+EXCHANGE_ID = "bybit"      # bybit não bloqueia IPs de cloud (Render/AWS)
+QUOTE_ASSET = "USDT"
 
 # ─── Timeframe ────────────────────────────────────────────────────────────────
 # 15m = scalp  |  1h = day trade  |  4h = swing  |  1d = posicional

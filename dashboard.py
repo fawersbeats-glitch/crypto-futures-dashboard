@@ -319,10 +319,15 @@ def analyze_pair(exchange, symbol, timeframe):
 def get_top_symbols(exchange):
     markets = exchange.load_markets()
     tickers = exchange.fetch_tickers()
-    futures = [s for s,m in markets.items()
-               if m.get("quote")==QUOTE_ASSET
-               and m.get("type") in("future","swap","linear") and s in tickers]
-    futures.sort(key=lambda s:tickers[s].get("quoteVolume") or 0, reverse=True)
+    futures = [
+        s for s,m in markets.items()
+        if m.get("quote") == QUOTE_ASSET
+        and m.get("type") in ("future", "swap", "linear")
+        and m.get("active", True)
+        and s in tickers
+        and ":USDT" in s  # perpétuos USDT apenas
+    ]
+    futures.sort(key=lambda s: tickers[s].get("quoteVolume") or 0, reverse=True)
     return futures[:TOP_PAIRS]
 
 # ─── Global state ─────────────────────────────────────────────────────────────
@@ -337,11 +342,17 @@ state = {
 state_lock = threading.Lock()
 
 def make_exchange():
-    return getattr(ccxt, EXCHANGE_ID)({
+    opts = {
         "enableRateLimit": True,
         "timeout": 20000,
-        "options": {"defaultType": "future"},
-    })
+    }
+    if EXCHANGE_ID == "bybit":
+        opts["options"] = {"defaultType": "linear"}
+    elif EXCHANGE_ID in ("okx",):
+        opts["options"] = {"defaultType": "swap"}
+    else:
+        opts["options"] = {"defaultType": "future"}
+    return getattr(ccxt, EXCHANGE_ID)(opts)
 
 def scan_loop():
     exchange = make_exchange()
