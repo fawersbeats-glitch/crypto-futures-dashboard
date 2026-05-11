@@ -774,14 +774,12 @@ def open_browser():
     time.sleep(1.5)
     webbrowser.open("http://127.0.0.1:5000")
 
-# Start scan loop immediately (needed for gunicorn / cloud starts too)
-t_scan = threading.Thread(target=scan_loop, daemon=True)
-t_scan.start()
-
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     host = "0.0.0.0" if IS_CLOUD else "127.0.0.1"
     print(f"\n  ⬡ CryptoFutures Pro Dashboard  →  http://{host}:{port}\n")
+    t_scan = threading.Thread(target=scan_loop, daemon=True)
+    t_scan.start()
     if not IS_CLOUD:
         threading.Thread(target=open_browser, daemon=True).start()
     app.run(host=host, port=port, threaded=True, use_reloader=False)
