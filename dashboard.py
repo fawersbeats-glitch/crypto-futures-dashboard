@@ -115,6 +115,127 @@ def rsi_divergence(price,rsi_s,lookback=20):
     if p[pM]>p[np.argmax(p[:h])] and r[pM]<r[np.argmax(p[:h])]: return "BEARISH"
     return None
 
+def detect_candle_patterns(df):
+    """Detecta padrões de velas clássicos nos últimos 5 candles."""
+    bull, bear = [], []
+    o=df["open"].values; hi=df["high"].values; lo=df["low"].values; c=df["close"].values
+    n=len(df)
+    if n < 4: return {"bull":bull,"bear":bear}
+    for i in range(max(3,n-5),n):
+        rng=hi[i]-lo[i]
+        if rng<1e-12: continue
+        body=abs(c[i]-o[i]); body_pct=body/rng
+        low_wick=min(c[i],o[i])-lo[i]; high_wick=hi[i]-max(c[i],o[i])
+        bullish=c[i]>o[i]
+        # Hammer / Shooting Star
+        if low_wick>body*2.0 and high_wick<body*0.5 and body_pct>0.05:
+            bull.append("Hammer")
+        if high_wick>body*2.0 and low_wick<body*0.5 and body_pct>0.05:
+            bear.append("Shooting Star")
+        # Pin Bar (pavio >70% do range)
+        if low_wick/rng>0.70 and bullish:  bull.append("Bullish Pin Bar")
+        if high_wick/rng>0.70 and not bullish: bear.append("Bearish Pin Bar")
+        # Doji (indecisão — contexto é tudo)
+        if body_pct<0.08: bull.append("Doji"); bear.append("Doji")
+        # Engulfing
+        if i>0:
+            pb=abs(c[i-1]-o[i-1]); pr=hi[i-1]-lo[i-1]
+            if pr<1e-12: continue
+            if c[i-1]<o[i-1] and bullish and c[i]>o[i-1] and o[i]<c[i-1] and body>pb*0.9:
+                bull.append("Bullish Engulfing")
+            if c[i-1]>o[i-1] and not bullish and c[i]<o[i-1] and o[i]>c[i-1] and body>pb*0.9:
+                bear.append("Bearish Engulfing")
+            # Harami
+            if c[i-1]<o[i-1] and bullish and o[i]>c[i-1] and c[i]<o[i-1]:
+                bull.append("Bullish Harami")
+            if c[i-1]>o[i-1] and not bullish and o[i]<c[i-1] and c[i]>o[i-1]:
+                bear.append("Bearish Harami")
+    # Morning Star / Evening Star (3 velas)
+    if n>=3:
+        i=n-1
+        fb=abs(c[i-2]-o[i-2]); mb=abs(c[i-1]-o[i-1])
+        if fb>0:
+            if (c[i-2]<o[i-2] and mb<fb*0.35 and c[i]>o[i]
+                    and c[i]>(o[i-2]+c[i-2])/2): bull.append("Morning Star")
+            if (c[i-2]>o[i-2] and mb<fb*0.35 and c[i]<o[i]
+                    and c[i]<(o[i-2]+c[i-2])/2): bear.append("Evening Star")
+    # Three White Soldiers / Three Black Crows
+    if n>=3:
+        i=n-1
+        if (c[i]>o[i] and c[i-1]>o[i-1] and c[i-2]>o[i-2]
+                and c[i]>c[i-1]>c[i-2] and o[i]>o[i-1] and o[i-1]>o[i-2]):
+            bull.append("Three White Soldiers")
+        if (c[i]<o[i] and c[i-1]<o[i-1] and c[i-2]<o[i-2]
+                and c[i]<c[i-1]<c[i-2] and o[i]<o[i-1] and o[i-1]<o[i-2]):
+            bear.append("Three Black Crows")
+    return {"bull":list(dict.fromkeys(bull)),"bear":list(dict.fromkeys(bear))}
+
+def detect_chart_patterns(sh, sl, price, h_ser, l_ser):
+    """Detecta padrões gráficos clássicos a partir de swing highs/lows."""
+    bull, bear = [], []
+    if len(sh)<2 or len(sl)<2: return {"bull":bull,"bear":bear}
+    hi1,hi2=sh[-2][1],sh[-1][1]; lo1,lo2=sl[-2][1],sl[-1][1]
+    safe_hi=max(hi1,1e-12); safe_lo=max(lo1,1e-12)
+    # Double Bottom (W)
+    if abs(lo1-lo2)/safe_lo<0.025 and price>(lo1+lo2)/2: bull.append("Double Bottom (W)")
+    # Double Top (M)
+    if abs(hi1-hi2)/safe_hi<0.025 and price<(hi1+hi2)/2: bear.append("Double Top (M)")
+    flat_top    = abs(hi1-hi2)/safe_hi<0.02
+    rising_bot  = lo2>lo1*1.005
+    flat_bot    = abs(lo1-lo2)/safe_lo<0.02
+    falling_top = hi2<hi1*0.995
+    falling_bot = lo2<lo1*0.995
+    # Ascending Triangle
+    if flat_top and rising_bot:   bull.append("Ascending Triangle")
+    # Descending Triangle
+    if flat_bot and falling_top:  bear.append("Descending Triangle")
+    # Symmetrical Triangle
+    if falling_top and rising_bot:
+        if price>(hi2+lo2)/2: bull.append("Symmetrical Triangle")
+        else:                 bear.append("Symmetrical Triangle")
+    # Bull/Bear Flag (consolidação apertada após impulso)
+    try:
+        rng_20=float(h_ser.iloc[-20:].max()-l_ser.iloc[-20:].min())
+        rng_5 =float(h_ser.iloc[-5:].max() -l_ser.iloc[-5:].min())
+        if rng_20>0 and rng_5/rng_20<0.30:
+            if lo2>lo1:  bull.append("Bull Flag")
+            elif hi2<hi1: bear.append("Bear Flag")
+    except Exception: pass
+    # Rising/Falling Wedge
+    if rising_bot and falling_top and not flat_top and not flat_bot:
+        bear.append("Rising Wedge")  # compressão para cima = bearish
+    if falling_bot and flat_top and not rising_bot:
+        bull.append("Falling Wedge")  # compressão para baixo = bullish
+    return {"bull":list(dict.fromkeys(bull)),"bear":list(dict.fromkeys(bear))}
+
+def detect_support_resistance(df, price, tolerance=0.008):
+    """Identifica zonas de S/R baseadas em clusters de preço (3+ toques)."""
+    h=df["high"].values[-80:]; l=df["low"].values[-80:]
+    all_p=np.concatenate([h,l])
+    levels=[]
+    for p in all_p:
+        if p<=0: continue
+        touches=int(np.sum(np.abs(all_p-p)/p<tolerance))
+        if touches>=3 and not any(abs(ex-p)/p<tolerance for ex in levels):
+            levels.append(float(p))
+    levels.sort()
+    return levels
+
+def detect_squeeze(c, h, l, macd_hist):
+    """
+    TTM Squeeze (John Carter): BB dentro do Keltner Channel = volatilidade comprimida.
+    Retorna (squeeze_ativo, direcao_do_release).
+    direcao_do_release: True=bull, False=bear, None=squeeze ainda ativo.
+    """
+    bb_up,_,bb_lo=bollinger(c,20,2.0)
+    kc_mid=ema(c,20); atr_s=atr(h,l,c,14)
+    kc_up=kc_mid+1.5*atr_s; kc_lo=kc_mid-1.5*atr_s
+    sq_now =(bb_lo.iloc[-1]>kc_lo.iloc[-1]) and (bb_up.iloc[-1]<kc_up.iloc[-1])
+    sq_prev=(bb_lo.iloc[-2]>kc_lo.iloc[-2]) and (bb_up.iloc[-2]<kc_up.iloc[-2])
+    if sq_prev and not sq_now:          # squeeze acabou de explodir!
+        return True, (macd_hist>0)
+    return sq_now, None                 # squeeze ativo sem direção ainda
+
 WEIGHTS = {
     # ── TIER 1: Estrutura — base obrigatória (fundamentos da operação) ──────────
     "market_structure": 4,   # HH+HL / LH+LL — Dow Theory + ICT
@@ -138,6 +259,12 @@ WEIGHTS = {
     # ── TIER 4: Sentimento — crypto-específico ─────────────────────────────────
     "funding_rate":     2,   # Contrarian: funding negativo = pressão vendida = long
     "open_interest":    1,   # OI crescente confirma tendência
+
+    # ── TIER 5: Price Action & Padrões Gráficos ───────────────────────────────
+    "candle_pattern":   3,   # Padrões de velas (engulfing, pin bar, morning star, etc.)
+    "chart_pattern":    2,   # Padrões gráficos clássicos (double top/bottom, triângulos)
+    "sr_confluence":    2,   # Confluência com S/R histórico (zonas testadas 3x+)
+    "squeeze":          2,   # TTM Squeeze — volatilidade comprimida → breakout iminente
 }
 MAX_SCORE = sum(WEIGHTS.values())
 
@@ -236,6 +363,14 @@ def analyze_pair(exchange, symbol, timeframe, candle_limit=None, skip_extra_call
         rsi_recov_long  = 30 <= rsi_val < 42
         rsi_extended    = rsi_val > 68 or rsi_val < 32  # sobrecomprado/vendido extremo
 
+        # ── Price action & padrões gráficos ────────────────────────────────────
+        sq_active, sq_release_bull = detect_squeeze(c, h, l, mh)
+        cand_pats  = detect_candle_patterns(df)
+        chart_pats = detect_chart_patterns(sh, sl, price, h, l)
+        sr_levels  = detect_support_resistance(df, price)
+        near_sup   = [lv for lv in sr_levels if lv<price and abs(lv-price)/max(price,1e-12)<0.015]
+        near_res   = [lv for lv in sr_levels if lv>price and abs(lv-price)/max(price,1e-12)<0.015]
+
         # ── Acumulação de pontos (Long e Short em paralelo) ─────────────────────
         ls, ss = [], []
         def la(k,m):  ls.append({"key":k,"msg":m,"tier":WEIGHTS.get(k,1)})
@@ -320,6 +455,24 @@ def analyze_pair(exchange, symbol, timeframe, candle_limit=None, skip_extra_call
         if bos_bear:
             ssc += aw("bos_signal"); sa2("bos_signal",f"BOS Bearish — rompeu swing low anterior ({fmtp(sl[-2][1] if len(sl)>=2 else 0)})")
 
+        # Candlestick patterns — price action puro confirma zonas
+        _strong_bull = {"Bullish Engulfing","Bullish Pin Bar","Morning Star","Three White Soldiers","Hammer"}
+        _strong_bear = {"Bearish Engulfing","Bearish Pin Bar","Evening Star","Three Black Crows","Shooting Star"}
+        _bc = [p for p in cand_pats["bull"] if p!="Doji"]
+        _sc = [p for p in cand_pats["bear"] if p!="Doji"]
+        if _bc:
+            w = aw("candle_pattern") if any(p in _strong_bull for p in _bc) else 1
+            lsc += w; la("candle_pattern", f"Candle bullish: {_bc[0]}")
+        if _sc:
+            w = aw("candle_pattern") if any(p in _strong_bear for p in _sc) else 1
+            ssc += w; sa2("candle_pattern", f"Candle bearish: {_sc[0]}")
+
+        # Chart patterns — estruturas clássicas de análise técnica
+        if chart_pats["bull"]:
+            lsc += aw("chart_pattern"); la("chart_pattern", f"Padrão gráfico: {chart_pats['bull'][0]}")
+        if chart_pats["bear"]:
+            ssc += aw("chart_pattern"); sa2("chart_pattern", f"Padrão gráfico: {chart_pats['bear'][0]}")
+
         # ── TIER 3: CONFIRMAÇÃO DE MOMENTUM ─────────────────────────────────────
         # RSI — zona de qualidade (não entrar em extremos esgotados)
         if rsi_ideal_long:
@@ -384,6 +537,21 @@ def analyze_pair(exchange, symbol, timeframe, candle_limit=None, skip_extra_call
             ssc += aw("vwap_confluence"); sa2("vwap_confluence",f"Rejeição do VWAP ({fmtp(vwap_val)}) — resistência institucional")
         else:
             ssc += 1; sa2("vwap_confluence",f"Abaixo do VWAP ({fmtp(vwap_val)})")
+
+        # Suporte/Resistência histórico — zonas testadas 3x+ são magnéticas
+        if near_sup:
+            lsc += aw("sr_confluence"); la("sr_confluence",f"S/R histórico: suporte em {fmtp(near_sup[-1])} (zona testada múltiplas vezes)")
+        if near_res:
+            ssc += aw("sr_confluence"); sa2("sr_confluence",f"S/R histórico: resistência em {fmtp(near_res[0])} (zona testada múltiplas vezes)")
+
+        # TTM Squeeze — compressão de volatilidade antes do breakout
+        if sq_release_bull is True:
+            lsc += aw("squeeze"); la("squeeze","TTM Squeeze liberado para ALTA — breakout bullish em progresso")
+        elif sq_release_bull is False:
+            ssc += aw("squeeze"); sa2("squeeze","TTM Squeeze liberado para BAIXA — breakout bearish em progresso")
+        elif sq_active:
+            if mh>0: lsc+=1; la("squeeze","Squeeze ativo (BB<KC) — volatilidade coiling, breakout bull provável")
+            else:    ssc+=1; sa2("squeeze","Squeeze ativo (BB<KC) — volatilidade coiling, breakout bear provável")
 
         # ── TIER 4: SENTIMENTO CRYPTO ────────────────────────────────────────────
         if funding_rate is not None:
