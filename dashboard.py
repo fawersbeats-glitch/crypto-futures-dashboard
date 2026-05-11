@@ -362,9 +362,7 @@ def make_exchange():
         "enableRateLimit": True,
         "timeout": 20000,
     }
-    if EXCHANGE_ID == "bybit":
-        opts["options"] = {"defaultType": "linear"}
-    elif EXCHANGE_ID in ("okx",):
+    if EXCHANGE_ID in ("bybit", "gate", "gateio", "okx", "mexc"):
         opts["options"] = {"defaultType": "swap"}
     else:
         opts["options"] = {"defaultType": "future"}

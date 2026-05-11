@@ -4,7 +4,7 @@ Edite aqui para personalizar a análise
 """
 
 # ─── Exchange ─────────────────────────────────────────────────────────────────
-EXCHANGE_ID = "bybit"      # bybit não bloqueia IPs de cloud (Render/AWS)
+EXCHANGE_ID = "gate"       # gate.io: sem restrição geográfica, funciona em cloud
 QUOTE_ASSET = "USDT"
 
 # ─── Timeframe ────────────────────────────────────────────────────────────────
