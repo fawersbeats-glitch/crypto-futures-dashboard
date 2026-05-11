@@ -368,14 +368,18 @@ def make_exchange():
         opts["options"] = {"defaultType": "future"}
     return getattr(ccxt, EXCHANGE_ID)(opts)
 
+IS_CLOUD = bool(os.environ.get("RENDER") or os.environ.get("PORT"))
+CLOUD_TOP_PAIRS = 12  # fewer pairs on free-tier (0.1 vCPU)
+
 def scan_loop():
     exchange = make_exchange()
+    pairs_limit = CLOUD_TOP_PAIRS if IS_CLOUD else TOP_PAIRS
     while True:
         with state_lock:
             state["scanning"] = True
-            state["current_pair"] = "Conectando à Binance..."
+            state["current_pair"] = "Conectando..."
         try:
-            symbols = get_top_symbols(exchange)
+            symbols = get_top_symbols(exchange)[:pairs_limit]
         except Exception:
             symbols = []
 
@@ -395,6 +399,7 @@ def scan_loop():
                 if r: results.append(r)
             except Exception:
                 pass
+            time.sleep(0.3)  # yield CPU to gunicorn worker threads
         results.sort(key=lambda x: x["score"], reverse=True)
         with state_lock:
             state["opportunities"]  = results
@@ -827,7 +832,7 @@ def health():
         })
 
 # ─── Main ──────────────────────────────────────────────────────────────────────
-IS_CLOUD = os.environ.get("RENDER") or os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("PORT")
+IS_CLOUD = bool(os.environ.get("RENDER") or os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("PORT"))
 
 def open_browser():
     time.sleep(1.5)
