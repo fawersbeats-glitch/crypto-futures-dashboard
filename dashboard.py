@@ -800,6 +800,18 @@ es.onerror=()=>{statusTxt&&(statusTxt.textContent='RECONECTANDO...')};
 def index():
     return render_template_string(HTML)
 
+@app.route("/health")
+def health():
+    from flask import jsonify
+    with state_lock:
+        return jsonify({
+            "exchange": EXCHANGE_ID,
+            "scanning": state["scanning"],
+            "current_pair": state["current_pair"],
+            "last_update": state["last_update"],
+            "opportunities": len(state["opportunities"]),
+        })
+
 # ─── Main ──────────────────────────────────────────────────────────────────────
 IS_CLOUD = os.environ.get("RENDER") or os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("PORT")
 
