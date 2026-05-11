@@ -1161,6 +1161,17 @@ def health():
             "opportunities": len(state["opportunities"]),
         })
 
+@app.route("/api")
+def api():
+    """Retorna as oportunidades atuais como JSON (usado pelo monitor.py)."""
+    from flask import jsonify
+    with state_lock:
+        return jsonify({
+            "opportunities": state["opportunities"],
+            "last_update":   state["last_update"],
+            "scanning":      state["scanning"],
+        })
+
 # ─── Main ──────────────────────────────────────────────────────────────────────
 IS_CLOUD = bool(os.environ.get("RENDER") or os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("PORT"))
 
